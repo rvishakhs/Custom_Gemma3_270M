@@ -8,6 +8,43 @@ import os
 
 import numpy as np
 
+# Congif Gemma 3 
+GEMMA3_CONFIG_270M = {
+    "vocab_size": 50257,
+    "context_length": 32_768,
+    "emb_dim": 640,
+    "n_heads": 4,
+    "n_layers": 18,
+    "hidden_dim": 2048,
+    "head_dim": 256,
+    "qk_norm": True,
+    "n_kv_groups": 1,
+    "rope_local_base": 10_000.0,
+    "rope_base": 1_000_000.0,
+    "sliding_window": 512,
+      "layer_types": [
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "full_attention"
+    ],
+    "dtype": torch.bfloat16,
+    "query_pre_attn_scalar": 256,
+}
 
 # Rotary Positional Embeddings (RoPE) functions
 def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype= torch.float32):
@@ -166,3 +203,82 @@ class FeedForward(nn.Module):
         return self.fc3(x)
 
 
+class TransformerBlock(nn.Module):
+    def __init__(self, cfg: dict, attn_type: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.attn_type = attn_type
+        self.att = GroupedQueryAttention(
+            d_in=cfg['emb_dim'],
+            num_heads=cfg['n_heads'],
+            num_kv_groups=cfg['n_kv_groups'],
+            head_dim=cfg['head_dim'],
+            qk_norm=cfg['qk_norm'],
+            query_pre_attn_scalar=cfg['query_pre_attn_scalar'],
+            dtype=cfg['dtype'],
+        )
+
+        self.ff = FeedForward(cfg)
+        self.input_layernorm = RMSNorm(cfg['emb_dim'], eps=1e-6)
+        self.post_attention_layer_norm = RMSNorm(cfg['emb_dim'], eps=1e-6)
+        self.pre_feedforward_layer_norm = RMSNorm(cfg['emb_dim'], eps=1e-6)
+        self.post_feedforward_layer_norm = RMSNorm(cfg['emb_dim'], eps=1e-6)
+
+    def forward(
+            self,
+            x, 
+            mask_global, 
+            mask_local,
+            cos_global,
+            sin_global,
+            cos_local,
+            sin_local
+    ):
+        # Shortcut connection for attention block
+        shortcut = x
+
+        # Passing to the first layer norm
+        x = self.input_layernorm(x)
+
+        # Passing to attention block
+        if self.attn_type == "sliding_attention":
+            attn_mask = mask_local
+            cos = cos_local
+            sin = sin_local
+        else:
+            attn_mask = mask_global
+            cos = cos_global
+            sin = sin_global
+
+        x_attn = self.att(x, attn_mask, cos, sin)
+        x_attn = self.post_attention_layer_norm(x_attn)
+        x = shortcut + x_attn
+
+        # After the attention block -> Passing to a feed forward network 
+        # Shortcut connection for feedforward block
+
+        shortcut = x
+        x_ffn = self.pre_feedforward_layer_norm(x)
+        x_ffn = self.ff(x_ffn)
+        x_ffn = self.post_feedforward_layer_norm(x_ffn)
+        x = shortcut + x_ffn
+
+        return x
+    
+    # Entire Gemma 3 Architecture
+    class Gemma3Model(nn.Module):
+        def __init__(self,cfg: dict,  *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            assert cfg['layer_types'] is not None and len(cfg['layer_types']) == cfg['n_layers'], "cfg['layer_types'] must be a list of length cfg['n_layers']"
+
+            # Main Model Parameters 
+            self.tok_emb = nn.Embedding(cfg['vocab_size'], cfg['emb_dim'], dtype=cfg['dtype'])
+            self.blocks = nn.ModuleList([
+                TransformerBlock(cfg, attn_type) for attn_type in cfg['layer_types']
+            ])
+
+            self.final_layer_norm = RMSNorm(cfg['emb_dim'], eps=1e-6)
+            self.out_head = nn.Linear(cfg['emb_dim'], cfg['vocab_size'], bias=False, dtype=cfg['dtype'])
+            self.cfg = cfg
+
+            
