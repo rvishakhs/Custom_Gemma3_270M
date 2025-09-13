@@ -120,5 +120,26 @@ for epoch in tqdm(range(max_iters)):
         losses = estimate_loss(model)
         print(f"Epoch {epoch}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         print(f"The current learning rate: {optimizer.param_groups[0]['lr']:.5f}")
+        train_loss_list += [losses["train"]]
+        validation_loss_list += [losses["val"]]
 
+        if losses['val'] < best_val_loss:
+            best_val_loss = losses['val']
+            torch.save(model.state_dict(), best_model_params_path)
+    
+    # Ensure X and Y are on the correct device 
+    X, y = get_batch_optimized('train')
+    X, y = X.to(device), y.to(device)
+
+
+    with ctx:
+        logits, loss = model(X, y)
+        loss = loss / gradient_accumulation_steps
+        scaler.scale(loss).backward()  # Scales loss. Calls backward() on scaled loss to create scaled gradients.
+    if ((epoch + 1) % gradient_accumulation_steps == 0) or (epoch + 1 == max_iters):
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+    scheduler.step()
 
