@@ -4,6 +4,7 @@ from tqdm.auto import tqdm
 import torch
 
 
+
 # we need to check if the cuda available or not 
 
 cuda_available = torch.cuda.is_available()

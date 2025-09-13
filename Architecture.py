@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import math
 from tqdm.auto import tqdm
 from contextlib import nullcontext
+from batch_creation import get_batch, get_batch_optimized
 import os
 
 import numpy as np
